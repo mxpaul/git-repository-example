@@ -7,6 +7,9 @@ use feature 'state';
 
 use Data::Dumper;
 use Carp;
+use AnyEvent;
+use AnyEvent::Handle;
+use System::Command -quiet;
 use Git::Repository;
 
 ###############################################################################
@@ -79,6 +82,39 @@ sub git_fetch {
   git_exec($ctx, fetch => [$ctx->{opt}{Remote}]);
 }
 
+sub fd_reader {
+  my $cv = pop or croak 'want cv';
+  my $arg = shift; croak 'want hash' unless ref $arg eq 'HASH';
+
+  my %s;
+  $cv->begin;
+  $s{handle} = AnyEvent::Handle->new(
+    fh => $arg->{fd},
+    on_error => sub {
+      my ($h, $fatal, $err) = (shift, shift, shift);
+      ERROR('%s stderr: %s on_error: %s', $arg->{desc}, ($fatal? '[FATAL]' : ''), $err//'<undef>' );
+      $h->destroy;
+      $cv->end;
+      undef %s;
+    },
+    on_read => sub {
+      #WARN('%s stderr: ENTER on_read', $desc);
+      %s or return;
+      my $h = shift or return;
+      while (length($h->{rbuf}) && $h->{rbuf} =~ /\G([^\n]+)?$/sm) {
+        my $line = substr($h->{rbuf}, 0, length($1//'') + 1, '');
+        return unless defined $line;
+        chomp $line;
+        push @{$arg->{dst}}, $line if ref $arg->{dst} eq 'ARRAY';
+        $arg->{logger}->($line) if ref $arg->{logger} eq 'CODE';
+      }
+    },
+    on_eof => sub {
+      $cv->end;
+      delete $s{err_handle};
+    },
+  );
+}
 
 sub git_exec {
   my $ctx = shift or croak 'want context';
@@ -86,14 +122,15 @@ sub git_exec {
   croak 'want array' unless ref $git_args eq 'ARRAY';
   my $ret = {error => 0, fatal => 0, stdout => [], stderr => []};
   my $desc = join(' ', 'git', $git_cmd, map{ "$_" } @$git_args);
+  WARN('====================================');
   WARN('run %s', $desc);
+  my $cv = AE::cv;
   eval {
     my $cmd = $ctx->{git}->command($git_cmd => @$git_args);
-    @{$ret->{stderr}} = $cmd->stderr->getlines();
-    @{$ret->{stdout}} = $cmd->stdout->getlines(); # FIXME: may block forever in case of interactive command
-    $cmd->close;
-    chomp, ERROR("$desc: $_") for @{$ret->{stderr}};
-    chomp, WARN("$desc: $_") for @{$ret->{stdout}};
+    fd_reader({fd => $cmd->stderr, desc => $desc, logger => \&ERROR, dst => $ret->{stderr}}, $cv);
+    fd_reader({fd => $cmd->stdout, desc => $desc, logger => \&WARN, dst => $ret->{stdout}}, $cv);
+    $cv->recv;
+    #$cmd->close if $cmd->is_terminated;
     WARN('success %s', $desc);
   }; if ($@) {
     DIE('%s: %s', $desc, $@);
