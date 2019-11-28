@@ -145,7 +145,7 @@ my $opt = {
   RepoUrl => 'git@github.com:mxpaul/git-repository-example.git',
   Remote => 'origin',
   WorkDir => '/home/user/tmp/test/git-repository-example',
-  Branch => 'master',
+  Branch => 'origin/master',
 };
 
 my $ctx = {
