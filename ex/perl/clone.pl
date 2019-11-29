@@ -86,34 +86,51 @@ sub fd_reader {
   my $cv = pop or croak 'want cv';
   my $arg = shift; croak 'want hash' unless ref $arg eq 'HASH';
 
-  my %s;
+  my %s = (rbuf => '');
+  my $process_rbuf = sub {
+    while (length($s{rbuf}) && $s{rbuf} =~ /\G([^\n]+)?$/sm) {
+      my $line = substr($s{rbuf}, 0, length($1//'') + 1, '');
+      return unless defined $line;
+      chomp $line;
+      push @{$arg->{dst}}, $line if ref $arg->{dst} eq 'ARRAY';
+      $arg->{logger}->($line) if ref $arg->{logger} eq 'CODE';
+    }
+
+    #my $pos = 0;
+    #while (length($s{rbuf}) && $s{rbuf} =~ /\G(.*)\n?$/mg) {
+    #  $pos = pos($s{rbuf});
+    #  #$pos += length($1) + 1;
+    #  #WARN('MATCH [%s]', $1);
+    #  #last unless defined (my $line = $1);
+    #  #my $line = substr($s{rbuf}, 0, length($1//'') + 1, '');
+    #  #return unless defined $line;
+    #  #chomp $line;
+    #  push @{$arg->{dst}}, $1 if ref $arg->{dst} eq 'ARRAY';
+    #  $arg->{logger}->($1) if ref $arg->{logger} eq 'CODE';
+    #}
+    #substr($s{rbuf}, 0, $pos, '') if $pos;
+  };
+
   $cv->begin;
-  $s{handle} = AnyEvent::Handle->new(
-    fh => $arg->{fd},
-    on_error => sub {
-      my ($h, $fatal, $err) = (shift, shift, shift);
-      ERROR('%s stderr: %s on_error: %s', $arg->{desc}, ($fatal? '[FATAL]' : ''), $err//'<undef>' );
-      $h->destroy;
-      $cv->end;
-      undef %s;
-    },
-    on_read => sub {
-      #WARN('%s stderr: ENTER on_read', $desc);
-      %s or return;
-      my $h = shift or return;
-      while (length($h->{rbuf}) && $h->{rbuf} =~ /\G([^\n]+)?$/sm) {
-        my $line = substr($h->{rbuf}, 0, length($1//'') + 1, '');
-        return unless defined $line;
-        chomp $line;
-        push @{$arg->{dst}}, $line if ref $arg->{dst} eq 'ARRAY';
-        $arg->{logger}->($line) if ref $arg->{logger} eq 'CODE';
+  $s{rw} = AE::io $arg->{fd}, 0, sub {
+      return unless %s;
+      my $r = sysread($arg->{fd}, $s{rbuf}, 256*1024, length $s{rbuf});
+      if ($r) {
+        $process_rbuf->();
+      } elsif (defined $r) { # EOF
+        $process_rbuf->() if length $s{rbuf};
+        undef %s;
+        $cv->end;
+      } elsif ($! == Errno::EAGAIN) {
+        return;
+      } else { # Error
+        ERROR('%s stderr: read error: %s', $arg->{desc}, $!);
+        undef %s;
+        close $arg->{fd};
+        $cv->end;
+        return;
       }
-    },
-    on_eof => sub {
-      $cv->end;
-      delete $s{err_handle};
-    },
-  );
+  };
 }
 
 sub git_exec {
